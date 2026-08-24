@@ -1,0 +1,23 @@
+services:
+  mlflow:
+    image: python:3.11-slim
+    working_dir: /mlflow
+    command: >
+      sh -c "pip install --no-cache-dir mlflow==2.21.2 &&
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:///mlflow.db
+      --default-artifact-root /mlflow/artifacts"
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow-data:/mlflow
+  api:
+    build: .
+    depends_on:
+      - mlflow
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+volumes:
+  mlflow-data:
