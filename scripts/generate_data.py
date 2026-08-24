@@ -6,6 +6,24 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
+POSITIVE_REVIEWS = [
+    "Сервис работает отлично, всё удобно и понятно",
+    "Поддержка быстро помогла, спасибо за хороший сервис",
+    "Пользуюсь давно и полностью доволен качеством",
+    "Тариф подходит, приложение работает стабильно",
+    "Всё нравится, планирую продолжать пользоваться",
+    "Проблем не было, могу рекомендовать сервис",
+]
+
+NEGATIVE_REVIEWS = [
+    "Поддержка не отвечает, думаю перейти к другому сервису",
+    "Слишком дорого и постоянно возникают проблемы",
+    "Разочарован качеством, хочу отменить подписку",
+    "Сервис стал неудобным, больше не хочу им пользоваться",
+    "Оплата списалась с задержкой, поддержка не помогла",
+    "Последнее обновление всё сломало, ищу альтернативу",
+]
+
 
 def make_dataset(rows, seed, drift=False):
     rng = np.random.default_rng(seed)
@@ -17,9 +35,24 @@ def make_dataset(rows, seed, drift=False):
     fee = np.select([plans == "basic", plans == "standard", plans == "premium"], [490, 990, 1990]).astype(float)
     fee += rng.normal(0, 35, rows)
     tenure = rng.integers(1, 37, rows)
-    logit = -0.6 - 0.08 * active_days + 0.33 * tickets + 0.22 * delay - 0.18 * nps - 0.025 * tenure
-    probability = 1 / (1 + np.exp(-logit))
-    churned = rng.binomial(1, probability)
+    sentiment_logit = (
+        1.2 - 0.08 * active_days + 0.35 * tickets + 0.18 * delay
+        - 0.22 * nps + (0.6 if drift else 0.0)
+    )
+    negative_probability = 1 / (1 + np.exp(-sentiment_logit))
+    negative_review = rng.binomial(1, negative_probability)
+    review_sentiment = np.where(negative_review == 1, "negative", "positive")
+    review_text = [
+        rng.choice(NEGATIVE_REVIEWS if is_negative else POSITIVE_REVIEWS)
+        for is_negative in negative_review
+    ]
+
+    churn_logit = (
+        -0.6 - 0.08 * active_days + 0.33 * tickets + 0.22 * delay
+        - 0.18 * nps - 0.025 * tenure + 1.15 * negative_review
+    )
+    churn_probability = 1 / (1 + np.exp(-churn_logit))
+    churned = rng.binomial(1, churn_probability)
     return pd.DataFrame({
         "customer_id": [f"C{seed}{i:05d}" for i in range(rows)],
         "tenure_months": tenure,
@@ -29,6 +62,8 @@ def make_dataset(rows, seed, drift=False):
         "payment_delay_days": delay,
         "nps_score": nps,
         "plan": plans,
+        "review_text": review_text,
+        "review_sentiment": review_sentiment,
         "churned": churned,
     })
 

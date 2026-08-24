@@ -13,7 +13,7 @@ monitor:
 	python -m src.churn_ml.monitoring
 
 test:
-	pytest -q
+	python -m pytest -q
 
 serve:
 	uvicorn src.churn_ml.api:app --reload --port 8000

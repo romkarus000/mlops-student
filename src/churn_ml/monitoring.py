@@ -3,25 +3,27 @@ from pathlib import Path
 import json
 import pandas as pd
 
-from .features import FEATURE_COLUMNS
+from .features import MONITORING_COLUMNS
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def monitor():
-    reference = pd.read_csv(ROOT / "data/raw/churn_reference.csv")[FEATURE_COLUMNS]
-    current = pd.read_csv(ROOT / "data/raw/churn_current.csv")[FEATURE_COLUMNS]
+    reference = pd.read_csv(ROOT / "data/raw/churn_reference.csv")[MONITORING_COLUMNS]
+    current = pd.read_csv(ROOT / "data/raw/churn_current.csv")[MONITORING_COLUMNS]
     Path(ROOT / "reports").mkdir(exist_ok=True)
     output = ROOT / "reports/monitoring_report.html"
     try:
-        from evidently import Report
-        from evidently.presets import DataDriftPreset
+        from evidently.metric_preset import DataDriftPreset
+        from evidently.report import Report
+
         report = Report(metrics=[DataDriftPreset()])
-        report.run(reference_data=reference, current_data=current).save_html(output)
-    except ModuleNotFoundError:
+        report.run(reference_data=reference, current_data=current)
+        report.save_html(str(output))
+    except (ImportError, ModuleNotFoundError):
         # Лёгкий fallback сохраняет понятный отчёт даже до установки Evidently.
         shifts = {}
-        for column in FEATURE_COLUMNS:
+        for column in MONITORING_COLUMNS:
             if pd.api.types.is_numeric_dtype(reference[column]):
                 shifts[column] = round(float(current[column].mean() - reference[column].mean()), 3)
             else:

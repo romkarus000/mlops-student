@@ -1,6 +1,7 @@
 services:
   mlflow:
     image: python:3.11-slim
+    restart: unless-stopped
     working_dir: /mlflow
     command: >
       sh -c "pip install --no-cache-dir mlflow==2.21.2 &&
@@ -11,13 +12,29 @@ services:
       - "5000:5000"
     volumes:
       - mlflow-data:/mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
   api:
-    build: .
+    build:
+      context: .
+      args:
+        SERVICE_VERSION: ${SERVICE_VERSION:-0.2.0}
+        GIT_SHA: ${GIT_SHA:-unknown}
+    restart: unless-stopped
     depends_on:
-      - mlflow
+      mlflow:
+        condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
       - ./models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 volumes:
   mlflow-data:

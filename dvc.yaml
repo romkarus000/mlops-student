@@ -14,7 +14,8 @@ stages:
       - src/churn_ml/training.py
       - params.yaml
     outs:
-      - models/churn_model.joblib
+      - models/hybrid_churn_bundle.joblib
+      - models/model_metadata.json
       - reports/training_metrics.json
   monitor:
     cmd: python -m src.churn_ml.monitoring
