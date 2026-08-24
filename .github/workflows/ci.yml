@@ -16,4 +16,4 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python scripts/generate_data.py
       - run: python -m src.churn_ml.training
-      - run: pytest -q
+      - run: python -m pytest -q
