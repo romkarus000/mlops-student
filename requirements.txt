@@ -8,4 +8,5 @@ joblib==1.4.2
 evidently==0.6.5
 PyYAML==6.0.2
 pytest==8.3.4
+httpx==0.28.1
 dvc==3.59.1

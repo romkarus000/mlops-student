@@ -1,49 +1,160 @@
-# Учебный MLOps-проект: прогноз оттока клиентов
+# Учебный MLOps-проект: гибридный прогноз оттока
 
-Этот репозиторий — заготовка сквозного учебного кейса. Модель оценивает вероятность того, что клиент подписочного сервиса уйдёт в следующие 30 дней. Она не претендует на бизнесовую точность: данные синтетические и специально содержат закономерности, которые удобно объяснять на занятиях.
+Проект показывает полный MLOps-цикл на задаче прогноза оттока клиентов. API
+анализирует текст отзыва, объединяет вероятность негативной тональности с
+поведенческими признаками клиента и возвращает риск оттока.
 
-## Что внутри
+Негативный отзыв повышает риск, но не определяет его автоматически: churn-модель
+также учитывает активность, срок жизни клиента, тариф, обращения в поддержку,
+задержки оплаты и NPS.
 
-| Компонент | Роль в учебном кейсе |
+## Архитектура
+
+| Компонент | Роль |
 |---|---|
-| `scripts/generate_data.py` | создаёт эталонные и «новые» данные; новые данные намеренно содержат сдвиг |
-| `src/churn_ml/training.py` | готовит признаки, обучает и оценивает модель |
-| MLflow | сохраняет параметры, метрики и артефакт модели; хранит версии моделей |
-| `src/churn_ml/api.py` | предоставляет прогноз через HTTP API |
-| `src/churn_ml/monitoring.py` | сравнивает новые данные с эталонными и ищет data drift |
-| DVC (`dvc.yaml`) | описывает воспроизводимый pipeline и зависимости его этапов |
-| Docker Compose | поднимает MLflow и API как отдельные сервисы |
+| `scripts/generate_data.py` | создаёт синтетические reference/current данные, отзывы и метки тональности |
+| TF-IDF + Logistic Regression | определяет positive/negative sentiment отзыва |
+| Churn Logistic Regression | использует клиентские признаки и negative sentiment probability |
+| MLflow | хранит параметры, метрики, bundle модели и неизменяемый run ID |
+| FastAPI | предоставляет `/health` и `/predict` с трассировкой запросов |
+| Evidently | формирует отчёт о data drift |
+| DVC | описывает воспроизводимый pipeline data → train → monitor |
+| Docker Compose | запускает MLflow и API |
+| GitHub Actions | проверяет pipeline, тесты, мониторинг и Docker-сборку |
 
-## Быстрый старт
+## Контракт API
 
-Нужен Python 3.11+ и Docker (для сервисов).
+Swagger UI после запуска доступен на `http://localhost:8000/docs`.
+
+Пример запроса:
+
+```json
+{
+  "customer_id": "C-HIGH-RISK",
+  "review_text": "Разочарован качеством, хочу отменить подписку",
+  "customer": {
+    "tenure_months": 2,
+    "monthly_fee": 1990,
+    "days_active_last_30": 2,
+    "support_tickets_last_30": 6,
+    "payment_delay_days": 8,
+    "nps_score": 1,
+    "plan": "premium"
+  }
+}
+```
+
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -H "X-Request-ID: demo-request-001" \
+  --data-binary @examples/predict_customer.json
+```
+
+Пример ответа:
+
+```json
+{
+  "request_id": "demo-request-001",
+  "customer_id": "C-HIGH-RISK",
+  "service": {
+    "version": "0.2.0",
+    "git_sha": "abc1234"
+  },
+  "model": {
+    "name": "hybrid-review-churn",
+    "version": "mlflow-run-id",
+    "mlflow_run_id": "mlflow-run-id",
+    "sha256": "model-digest",
+    "trained_at": "2026-08-24T12:00:00+00:00"
+  },
+  "review_analysis": {
+    "sentiment": "negative",
+    "negative_probability": 0.97
+  },
+  "churn_prediction": {
+    "probability": 0.63,
+    "risk": "high",
+    "threshold": 0.5
+  }
+}
+```
+
+Если `X-Request-ID` не передан, API создаёт UUID. Идентификатор возвращается
+одновременно в JSON и HTTP-заголовке. Версия модели — MLflow run ID, SHA256
+позволяет проверить целостность конкретного bundle.
+
+## Локальный запуск
+
+Нужен Python 3.11+.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python scripts/generate_data.py
 python -m src.churn_ml.training
 python -m src.churn_ml.monitoring
+python -m pytest -q
 uvicorn src.churn_ml.api:app --reload --port 8000
 ```
 
-Документация API откроется на `http://localhost:8000/docs`. Для отдельного MLflow UI можно выполнить `docker compose up --build` и открыть `http://localhost:5000`.
+Артефакты:
 
-## Два намеренно разных набора данных
+- `data/raw/churn_reference.csv` и `churn_current.csv`;
+- `models/hybrid_churn_bundle.joblib`;
+- `models/model_metadata.json`;
+- `reports/training_metrics.json`;
+- `reports/monitoring_report.html`.
 
-- `data/raw/churn_reference.csv` — исторический набор: на нём обучается модель.
-- `data/raw/churn_current.csv` — «следующий месяц»: в нём выше доля дорогих тарифов, меньше активных дней и больше обращений в поддержку. Это позволяет показать data drift и ухудшение качества, когда появится фактическая метка `churned`.
+Без переменной `MLFLOW_TRACKING_URI` обучение использует локальный каталог
+`mlruns`. При запуске через Compose run записывается в MLflow-сервис.
 
-## Границы учебного примера
+## Docker Compose
 
-В проекте уже есть все звенья цепочки, но облачная инфраструктура и автоматические триггеры намеренно не добавлены. Это позволяет сначала объяснить причинно-следственную логику, а затем при необходимости расширять стенд CI/CD, удалённым хранилищем DVC, registry и деплоем.
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f api
+```
 
-## Контрольный сценарий для демонстрации
+Сервисы:
 
-1. Сгенерировать данные: `make data`.
-2. Обучить baseline: `make train` — появятся `models/churn_model.joblib` и метрики.
-3. Открыть MLflow UI или показать локальные артефакты обучения.
-4. Запустить API: `make serve`; отправить `examples/predict_customer.json` в `POST /predict`.
-5. Выполнить `make monitor` и открыть HTML-отчёт: новые данные заметно отличаются от обучающей выборки.
-6. Обсудить решение: переобучать, откатывать модель либо сначала проверять бизнес-метрику на новых размеченных данных.
+- API: `http://localhost:8000`;
+- Swagger: `http://localhost:8000/docs`;
+- MLflow: `http://localhost:5000`.
+
+Для корректных версий образ можно собрать так:
+
+```bash
+SERVICE_VERSION=0.2.0 GIT_SHA=abc1234 docker compose build api
+```
+
+## DVC pipeline
+
+```bash
+dvc init
+dvc repro
+```
+
+Этапы в `dvc.yaml`:
+
+1. `generate_data`;
+2. `train`;
+3. `monitor`.
+
+Изменение кода, `params.yaml` или исходных данных перезапускает только
+зависимые этапы.
+
+## Метрики и ограничения
+
+Обучение сохраняет:
+
+- ROC AUC и Average Precision для churn;
+- Accuracy и F1 для sentiment;
+- размеры train/test выборок.
+
+Данные и отзывы синтетические. Метрики показывают воспроизводимость технического
+pipeline, а не готовность модели к реальному бизнес-применению. Для production
+понадобятся реальные отзывы, связь с последующим фактом оттока, контроль
+дисбаланса, защищённый ingress, аутентификация и постоянное хранилище мониторинга.

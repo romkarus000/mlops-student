@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 mlruns/
 models/*.joblib
+models/*.json
 reports/*.html
 reports/*.json
 data/raw/*.csv

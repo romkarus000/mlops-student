@@ -16,4 +16,6 @@ jobs:
       - run: pip install -r requirements.txt
       - run: python scripts/generate_data.py
       - run: python -m src.churn_ml.training
+      - run: python -m src.churn_ml.monitoring
       - run: python -m pytest -q
+      - run: docker build --build-arg SERVICE_VERSION=ci --build-arg GIT_SHA=${{ github.sha }} .

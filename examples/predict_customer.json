@@ -1,9 +1,13 @@
 {
-  "tenure_months": 5,
-  "monthly_fee": 990,
-  "days_active_last_30": 14,
-  "support_tickets_last_30": 2,
-  "payment_delay_days": 1,
-  "nps_score": 6,
-  "plan": "standard"
+  "customer_id": "C-HIGH-RISK",
+  "review_text": "Разочарован качеством, хочу отменить подписку",
+  "customer": {
+    "tenure_months": 2,
+    "monthly_fee": 1990,
+    "days_active_last_30": 2,
+    "support_tickets_last_30": 6,
+    "payment_delay_days": 8,
+    "nps_score": 1,
+    "plan": "premium"
+  }
 }
