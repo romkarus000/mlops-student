@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.py[cod]
+mlruns/
+models/*.joblib
+reports/*.html
+reports/*.json
+data/raw/*.csv
+.dvc/cache/
