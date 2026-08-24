@@ -38,16 +38,21 @@ def load_params():
         return yaml.safe_load(file)
 
 
-def build_sentiment_pipeline():
+def build_sentiment_pipeline(random_state=42):
     return Pipeline(
         [
             ("tfidf", TfidfVectorizer(ngram_range=(1, 2), min_df=2)),
-            ("model", LogisticRegression(max_iter=1000)),
+            (
+                "model",
+                LogisticRegression(
+                    max_iter=1000, solver="liblinear", random_state=random_state
+                ),
+            ),
         ]
     )
 
 
-def build_churn_pipeline():
+def build_churn_pipeline(random_state=42):
     preprocess = ColumnTransformer(
         [
             ("numeric", StandardScaler(), CHURN_NUMERIC_FEATURES),
@@ -59,7 +64,15 @@ def build_churn_pipeline():
         ]
     )
     return Pipeline(
-        [("preprocess", preprocess), ("model", LogisticRegression(max_iter=1000))]
+        [
+            ("preprocess", preprocess),
+            (
+                "model",
+                LogisticRegression(
+                    max_iter=1000, solver="liblinear", random_state=random_state
+                ),
+            ),
+        ]
     )
 
 
@@ -86,11 +99,11 @@ def train():
         stratify=data["churned"],
     )
 
-    sentiment_model = build_sentiment_pipeline()
+    sentiment_model = build_sentiment_pipeline(params["random_state"])
     sentiment_model.fit(train_data["review_text"], train_data["review_sentiment"])
     sentiment_predictions = sentiment_model.predict(test_data["review_text"])
 
-    churn_model = build_churn_pipeline()
+    churn_model = build_churn_pipeline(params["random_state"])
     churn_model.fit(
         prepare_churn_features(train_data, sentiment_model), train_data["churned"]
     )
@@ -139,6 +152,7 @@ def train():
             "churn_model": churn_model,
             "customer_features": CUSTOMER_FEATURE_COLUMNS,
             "sentiment_score_column": SENTIMENT_SCORE_COLUMN,
+            "threshold": params["threshold"],
         }
         joblib.dump(bundle, model_path)
         model_sha256 = hashlib.sha256(model_path.read_bytes()).hexdigest()
@@ -148,6 +162,7 @@ def train():
             "mlflow_run_id": model_version,
             "sha256": model_sha256,
             "trained_at": datetime.now(timezone.utc).isoformat(),
+            "threshold": params["threshold"],
             "metrics": metrics,
         }
         metadata_path.write_text(

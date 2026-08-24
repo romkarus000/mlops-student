@@ -4,6 +4,7 @@ stages:
     deps:
       - scripts/generate_data.py
       - params.yaml
+      - requirements.txt
     outs:
       - data/raw/churn_reference.csv
       - data/raw/churn_current.csv
@@ -13,9 +14,11 @@ stages:
       - data/raw/churn_reference.csv
       - src/churn_ml/training.py
       - params.yaml
+      - requirements.txt
     outs:
       - models/hybrid_churn_bundle.joblib
       - models/model_metadata.json
+    metrics:
       - reports/training_metrics.json
   monitor:
     cmd: python -m src.churn_ml.monitoring
@@ -23,5 +26,6 @@ stages:
       - data/raw/churn_reference.csv
       - data/raw/churn_current.csv
       - src/churn_ml/monitoring.py
+      - requirements.txt
     outs:
       - reports/monitoring_report.html

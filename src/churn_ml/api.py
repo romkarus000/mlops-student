@@ -145,7 +145,7 @@ def predict(payload: PredictionInput, request: Request):
     churn_probability = float(
         churn_model.predict_proba(pd.DataFrame([row]))[0, 1]
     )
-    threshold = 0.5
+    threshold = float(bundle["threshold"])
 
     return {
         "request_id": request.state.request_id,

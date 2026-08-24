@@ -1,4 +1,4 @@
-.PHONY: setup data train monitor test serve up
+.PHONY: setup data train monitor pipeline release verify test serve up
 
 setup:
 	python -m pip install -r requirements.txt
@@ -11,6 +11,16 @@ train:
 
 monitor:
 	python -m src.churn_ml.monitoring
+
+pipeline:
+	dvc repro
+
+release: pipeline
+	python scripts/build_release_manifest.py
+
+verify: release test
+	dvc status
+	dvc metrics show
 
 test:
 	python -m pytest -q

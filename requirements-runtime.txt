@@ -2,13 +2,6 @@ scikit-learn==1.6.1
 pandas==2.2.3
 numpy==1.26.4
 scipy==1.14.1
-mlflow==2.21.2
 fastapi==0.115.8
 uvicorn[standard]==0.34.0
 joblib==1.4.2
-evidently==0.6.5
-PyYAML==6.0.2
-pytest==8.3.4
-httpx==0.28.1
-dvc==3.59.1
-pathspec<1.0
