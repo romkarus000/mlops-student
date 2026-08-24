@@ -1,0 +1,26 @@
+stages:
+  generate_data:
+    cmd: python scripts/generate_data.py
+    deps:
+      - scripts/generate_data.py
+      - params.yaml
+    outs:
+      - data/raw/churn_reference.csv
+      - data/raw/churn_current.csv
+  train:
+    cmd: python -m src.churn_ml.training
+    deps:
+      - data/raw/churn_reference.csv
+      - src/churn_ml/training.py
+      - params.yaml
+    outs:
+      - models/churn_model.joblib
+      - reports/training_metrics.json
+  monitor:
+    cmd: python -m src.churn_ml.monitoring
+    deps:
+      - data/raw/churn_reference.csv
+      - data/raw/churn_current.csv
+      - src/churn_ml/monitoring.py
+    outs:
+      - reports/monitoring_report.html
