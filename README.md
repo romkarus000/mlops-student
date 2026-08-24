@@ -92,10 +92,9 @@ curl -X POST http://localhost:8000/predict \
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python scripts/generate_data.py
-python -m src.churn_ml.training
-python -m src.churn_ml.monitoring
-python -m pytest -q
+dvc repro
+python scripts/build_release_manifest.py
+make verify
 uvicorn src.churn_ml.api:app --reload --port 8000
 ```
 
@@ -105,7 +104,8 @@ uvicorn src.churn_ml.api:app --reload --port 8000
 - `models/hybrid_churn_bundle.joblib`;
 - `models/model_metadata.json`;
 - `reports/training_metrics.json`;
-- `reports/monitoring_report.html`.
+- `reports/monitoring_report.html`;
+- `reports/release_manifest.json` — паспорт конкретной поставки.
 
 Без переменной `MLFLOW_TRACKING_URI` обучение использует локальный каталог
 `mlruns`. При запуске через Compose run записывается в MLflow-сервис.
@@ -132,9 +132,14 @@ SERVICE_VERSION=0.2.0 GIT_SHA=abc1234 docker compose build api
 
 ## DVC pipeline
 
+Репозиторий уже инициализирован для DVC. Первый запуск строит все артефакты и
+создаёт локальный cache, повторный — пропускает неизменившиеся этапы:
+
 ```bash
-dvc init
 dvc repro
+dvc dag
+dvc status
+dvc metrics show
 ```
 
 Этапы в `dvc.yaml`:
@@ -144,7 +149,73 @@ dvc repro
 3. `monitor`.
 
 Изменение кода, `params.yaml` или исходных данных перезапускает только
-зависимые этапы.
+зависимые этапы. `dvc.lock` фиксирует точные хеши зависимостей и результатов;
+его нужно коммитить вместе с изменением pipeline. `requirements.txt` также
+является зависимостью этапов, поэтому смена ML-окружения не останется незаметной.
+
+В проекте данные синтетические, поэтому для занятия достаточно локального DVC
+cache. Для общей команды подключается remote, например S3:
+
+```bash
+dvc remote add -d storage s3://your-bucket/mlops-student
+dvc push
+```
+
+Адрес и учётные данные реального хранилища не коммитятся в учебный репозиторий.
+
+## MLflow и версия модели
+
+Каждое обучение создаёт MLflow run и сохраняет его неизменяемый ID в
+`models/model_metadata.json`. Тот же ID возвращают `/health` и `/predict`.
+Вместе с ним сохраняются параметры, метрики и SHA256 model bundle. Так можно
+ответить не только «какой код был в Git», но и «какой именно запуск создал
+модель, обслужившую запрос».
+
+Порог классификации берётся из `params.yaml`, попадает в model bundle и
+используется API. Поэтому изменение порога тоже проходит через DVC и не
+расходится между обучением и инференсом.
+
+## Паспорт релиза
+
+После `dvc repro` выполните:
+
+```bash
+SERVICE_VERSION=0.2.0 \
+GIT_SHA=$(git rev-parse HEAD) \
+IMAGE_TAG=mlops-student:0.2.0 \
+python scripts/build_release_manifest.py
+```
+
+`reports/release_manifest.json` связывает в одной записи:
+
+- версию сервиса и Git SHA;
+- SHA256 `dvc.lock`, `params.yaml`, полного и runtime-набора зависимостей;
+- SHA256 reference/current данных;
+- MLflow run ID, SHA256 модели и рабочий threshold;
+- метрики и тег Docker-образа.
+
+Скрипт завершится ошибкой, если bundle модели не совпадает с digest в
+метаданных. Это простая, но реальная проверка целостности поставки.
+
+`requirements.txt` описывает среду обучения и CI, а компактный
+`requirements-runtime.txt` — только зависимости API. Поэтому Docker-образ не
+содержит DVC, pytest, Evidently и другие инструменты, не нужные при инференсе.
+
+## Реальный CI
+
+Workflow `.github/workflows/ci.yml` на каждом pull request:
+
+1. устанавливает зафиксированные зависимости;
+2. выполняет `dvc repro`;
+3. формирует паспорт релиза;
+4. показывает DVC status и метрики;
+5. запускает тесты и собирает Docker-образ;
+6. прикладывает `dvc.lock`, метрики, metadata, monitoring report и release
+   manifest как evidence к запуску GitHub Actions.
+
+Это именно **CI**: workflow доказывает, что поставка воспроизводится и
+собирается. Автоматического развёртывания здесь намеренно нет. Публикация
+образа, approvals и deployment появятся на следующем шаге курса как CD.
 
 ## Метрики и ограничения
 

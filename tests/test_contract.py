@@ -41,6 +41,7 @@ def test_predict_returns_traceability_and_hybrid_prediction():
     assert body["review_analysis"]["sentiment"] == "negative"
     assert 0 <= body["review_analysis"]["negative_probability"] <= 1
     assert 0 <= body["churn_prediction"]["probability"] <= 1
+    assert body["churn_prediction"]["threshold"] == 0.5
 
 
 def test_health_exposes_service_and_model_versions():

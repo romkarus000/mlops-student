@@ -13,9 +13,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: pip
       - run: pip install -r requirements.txt
-      - run: python scripts/generate_data.py
-      - run: python -m src.churn_ml.training
-      - run: python -m src.churn_ml.monitoring
+      - name: Reproduce data, model and monitoring report
+        run: dvc repro
+      - name: Build release passport
+        env:
+          SERVICE_VERSION: 0.2.0
+          GIT_SHA: ${{ github.sha }}
+          IMAGE_TAG: mlops-student:${{ github.sha }}
+        run: python scripts/build_release_manifest.py
+      - name: Verify DVC state and show metrics
+        run: |
+          dvc status
+          dvc metrics show
       - run: python -m pytest -q
       - run: docker build --build-arg SERVICE_VERSION=ci --build-arg GIT_SHA=${{ github.sha }} .
+      - name: Upload reproducibility evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ github.sha }}
+          path: |
+            dvc.lock
+            models/model_metadata.json
+            reports/training_metrics.json
+            reports/monitoring_report.html
+            reports/release_manifest.json
