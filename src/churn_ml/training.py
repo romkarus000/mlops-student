@@ -178,7 +178,16 @@ def train():
         mlflow.log_artifact(str(metadata_path), artifact_path="model")
         mlflow.log_artifact(str(report_path), artifact_path="reports")
 
-    return {**metrics, "model_version": model_version, "model_sha256": model_sha256}
+        registered_model = mlflow.register_model(
+            model_uri=f"runs:/{run.info.run_id}/model", name=MODEL_NAME
+        )
+
+    return {
+        **metrics,
+        "model_version": model_version,
+        "model_sha256": model_sha256,
+        "registry_version": registered_model.version,
+    }
 
 
 if __name__ == "__main__":

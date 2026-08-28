@@ -16,11 +16,13 @@
 | TF-IDF + Logistic Regression | определяет positive/negative sentiment отзыва |
 | Churn Logistic Regression | использует клиентские признаки и negative sentiment probability |
 | MLflow | хранит параметры, метрики, bundle модели и неизменяемый run ID |
-| FastAPI | предоставляет `/health` и `/predict` с трассировкой запросов |
+| MLflow Model Registry | версионирует модель (`v1`, `v2`, ...) и хранит alias `production` |
+| FastAPI | предоставляет `/health`, `/predict`, `/admin/reload-model` с трассировкой запросов |
 | Evidently | формирует отчёт о data drift |
 | DVC | описывает воспроизводимый pipeline data → train → monitor |
 | Docker Compose | запускает MLflow и API |
-| GitHub Actions | проверяет pipeline, тесты, мониторинг и Docker-сборку |
+| GitHub Actions (CI) | `ci.yml` — проверяет pipeline, тесты, мониторинг и Docker-сборку |
+| GitHub Actions (CD) | `cd.yml` — публикует образ в GHCR и деплоит на сервер по SSH |
 
 ## Контракт API
 
@@ -175,6 +177,62 @@ dvc push
 используется API. Поэтому изменение порога тоже проходит через DVC и не
 расходится между обучением и инференсом.
 
+## Model Registry: продвижение и откат
+
+Каждое обучение не только логирует run, но и регистрирует новую версию модели
+в MLflow Model Registry (`hybrid-review-churn`, `v1`, `v2`, ...). Новая версия
+сама по себе ничего не меняет в проде — она просто становится доступной для
+сравнения и явного продвижения.
+
+Продвинуть версию в production (или откатиться на более раннюю) — один шаг,
+без пересборки образа:
+
+```bash
+python scripts/promote_model.py --version 3      # продвинуть v3
+python scripts/promote_model.py --version 2      # откатиться на v2
+```
+
+Скрипт просто переставляет alias `production` на нужную версию в MLflow — то
+же самое можно сделать без кода, в MLflow UI (`Models → hybrid-review-churn →
+Add Alias`).
+
+API резолвит модель для инференса не по локальному файлу, а по alias'у
+`production` через MLflow Model Registry, и **сам обнаруживает смену версии**:
+при каждом запросе (не чаще, чем раз в `MLFLOW_MODEL_REFRESH_SECONDS`, по
+умолчанию 30 секунд) сервис лёгким запросом сверяет, на какую версию сейчас
+указывает alias, и только если она отличается от закэшированной в памяти —
+скачивает новый bundle и подменяет модель. Ручной рестарт или редеплой
+сервиса не нужен. Если нужно применить продвижение немедленно, не дожидаясь
+истечения интервала:
+
+```bash
+curl -X POST http://localhost:8000/admin/reload-model
+```
+
+Если `MLFLOW_TRACKING_URI` не задан (например, локальный запуск без Compose),
+API прозрачно откатывается на старое поведение — читает
+`models/hybrid_churn_bundle.joblib` напрямую с диска.
+
+## Сравнение версии-кандидата с production
+
+Перед тем как продвигать новую версию, её можно оценить на тех же «текущих»
+(смещённых) данных, что использует мониторинг дрейфа:
+
+```bash
+python scripts/compare_versions.py --candidate 3
+# baseline по умолчанию — текущая версия за alias production
+python scripts/compare_versions.py --candidate 3 --baseline 2
+```
+
+Скрипт скачивает обе версии из Registry по номеру, прогоняет их на
+`data/raw/churn_current.csv` и печатает те же метрики (`roc_auc`,
+`average_precision`, `sentiment_accuracy`, `sentiment_f1`) бок о бок с
+разницей. Так как `churn_current.csv` — синтетические данные с намеренным
+сдвигом распределения, сравнение отвечает не просто «какая модель лучше
+вообще», а «какая версия увереннее держит удар на данных, непохожих на
+обучающие». Это ручной, «по требованию» шаг — естественная точка перед
+`promote_model.py`, а не часть автоматического CI.
+
 ## Паспорт релиза
 
 После `dvc repro` выполните:
@@ -201,9 +259,9 @@ python scripts/build_release_manifest.py
 `requirements-runtime.txt` — только зависимости API. Поэтому Docker-образ не
 содержит DVC, pytest, Evidently и другие инструменты, не нужные при инференсе.
 
-## Реальный CI
+## CI и CD
 
-Workflow `.github/workflows/ci.yml` на каждом pull request:
+Workflow `.github/workflows/ci.yml` на каждом pull request и push в `main`:
 
 1. устанавливает зафиксированные зависимости;
 2. выполняет `dvc repro`;
@@ -213,9 +271,20 @@ Workflow `.github/workflows/ci.yml` на каждом pull request:
 6. прикладывает `dvc.lock`, метрики, metadata, monitoring report и release
    manifest как evidence к запуску GitHub Actions.
 
-Это именно **CI**: workflow доказывает, что поставка воспроизводится и
-собирается. Автоматического развёртывания здесь намеренно нет. Публикация
-образа, approvals и deployment появятся на следующем шаге курса как CD.
+Workflow `.github/workflows/cd.yml` запускается автоматически после
+**успешного** завершения CI именно на ветке `main` (событие `workflow_run`) —
+то есть после мержа, а не на каждый pull request. Он:
+
+1. собирает Docker-образ и публикует его в GHCR
+   (`ghcr.io/<repo>:<sha>` и `:latest`);
+2. деплоит на сервер по SSH: заходит в `/opt/mlops-student`, обновляет код,
+   перезапускает `docker-compose.prod.yml`.
+
+Деплой использует GitHub Environment `production` (можно включить required
+reviewers) и секреты `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` —
+они привязаны к конкретному репозиторию и не переносятся при форке. В форке
+без своих секретов job деплоя просто упадёт на шаге SSH, ничьи чужие сервера
+это не затрагивает.
 
 ## Метрики и ограничения
 
