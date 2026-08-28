@@ -5,3 +5,4 @@ scipy==1.14.1
 fastapi==0.115.8
 uvicorn[standard]==0.34.0
 joblib==1.4.2
+mlflow-skinny==2.21.2

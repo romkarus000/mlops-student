@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from functools import lru_cache
+import threading
+import time
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -9,6 +10,8 @@ from uuid import uuid4
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from mlflow import MlflowClient
+from mlflow.artifacts import download_artifacts
 from pydantic import BaseModel, Field
 
 from .features import SENTIMENT_SCORE_COLUMN
@@ -19,6 +22,13 @@ MODEL_METADATA_PATH = ROOT / "models/model_metadata.json"
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "0.2.0")
 GIT_SHA = os.getenv("GIT_SHA", "unknown")
 LOGGER = logging.getLogger("uvicorn.error")
+
+MLFLOW_MODEL_NAME = "hybrid-review-churn"
+MLFLOW_MODEL_ALIAS = os.getenv("MLFLOW_MODEL_ALIAS", "production")
+REGISTRY_CACHE_DIR = ROOT / ".mlflow_model_cache"
+# how often a request is allowed to pay the cost of asking the registry
+# "is `production` still pointing at the version I have cached?"
+REGISTRY_REFRESH_SECONDS = float(os.getenv("MLFLOW_MODEL_REFRESH_SECONDS", "30"))
 
 app = FastAPI(title="Hybrid review churn API", version=SERVICE_VERSION)
 
@@ -88,19 +98,104 @@ async def add_request_id(request: Request, call_next):
     return response
 
 
-@lru_cache(maxsize=1)
+_model_lock = threading.Lock()
+_model_cache = {
+    "bundle": None,
+    "metadata": None,
+    "registry_version": None,  # version currently cached in memory
+    "checked_at": 0.0,  # monotonic time of the last "is it still current?" check
+}
+
+
+def _download_registry_version(tracking_uri, version_number):
+    local_dir = Path(
+        download_artifacts(
+            artifact_uri=f"models:/{MLFLOW_MODEL_NAME}/{version_number}",
+            tracking_uri=tracking_uri,
+            dst_path=str(REGISTRY_CACHE_DIR / f"v{version_number}"),
+        )
+    )
+    bundle = joblib.load(local_dir / "hybrid_churn_bundle.joblib")
+    metadata = json.loads(
+        (local_dir / "model_metadata.json").read_text(encoding="utf-8")
+    )
+    metadata["registry_version"] = version_number
+    metadata["registry_alias"] = MLFLOW_MODEL_ALIAS
+    return bundle, metadata
+
+
+def _load_from_registry():
+    """Return the model currently behind MLFLOW_MODEL_ALIAS, reusing the
+    in-memory copy unless the alias now points at a different version."""
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if not tracking_uri:
+        return None
+
+    now = time.monotonic()
+    with _model_lock:
+        is_fresh = now - _model_cache["checked_at"] < REGISTRY_REFRESH_SECONDS
+        if _model_cache["bundle"] is not None and is_fresh:
+            return _model_cache["bundle"], _model_cache["metadata"]
+
+        try:
+            client = MlflowClient(tracking_uri=tracking_uri)
+            current_version = client.get_model_version_by_alias(
+                MLFLOW_MODEL_NAME, MLFLOW_MODEL_ALIAS
+            ).version
+        except Exception as exc:  # registry unreachable or alias not set yet
+            LOGGER.warning("mlflow_registry_unavailable error=%s", exc)
+            if _model_cache["bundle"] is not None:
+                _model_cache["checked_at"] = now  # avoid hammering a downed server
+                return _model_cache["bundle"], _model_cache["metadata"]
+            return None
+
+        if current_version == _model_cache["registry_version"]:
+            _model_cache["checked_at"] = now
+            return _model_cache["bundle"], _model_cache["metadata"]
+
+        LOGGER.info(
+            "model_version_changed alias=%s previous=%s current=%s",
+            MLFLOW_MODEL_ALIAS,
+            _model_cache["registry_version"],
+            current_version,
+        )
+        bundle, metadata = _download_registry_version(tracking_uri, current_version)
+        _model_cache.update(
+            bundle=bundle,
+            metadata=metadata,
+            registry_version=current_version,
+            checked_at=now,
+        )
+        return bundle, metadata
+
+
 def load_artifacts():
+    from_registry = _load_from_registry()
+    if from_registry is not None:
+        return from_registry
+    if not MODEL_PATH.exists() or not MODEL_METADATA_PATH.exists():
+        raise FileNotFoundError("model artifacts not found in registry or locally")
     bundle = joblib.load(MODEL_PATH)
     metadata = json.loads(MODEL_METADATA_PATH.read_text(encoding="utf-8"))
     return bundle, metadata
 
 
 def get_artifacts():
-    if not MODEL_PATH.exists() or not MODEL_METADATA_PATH.exists():
+    try:
+        return load_artifacts()
+    except FileNotFoundError as exc:
         raise HTTPException(
             503, "Model is not trained. Run python -m src.churn_ml.training first."
-        )
-    return load_artifacts()
+        ) from exc
+
+
+@app.post("/admin/reload-model")
+def reload_model():
+    """Force an immediate alias check instead of waiting for the next
+    scheduled one (up to MLFLOW_MODEL_REFRESH_SECONDS away)."""
+    with _model_lock:
+        _model_cache["checked_at"] = 0.0
+    return {"status": "will_check_registry_on_next_request"}
 
 
 def public_model_metadata(metadata):
@@ -115,16 +210,20 @@ def public_model_metadata(metadata):
 
 @app.get("/health")
 def health():
-    model_ready = MODEL_PATH.exists() and MODEL_METADATA_PATH.exists()
-    metadata = None
-    if model_ready:
+    try:
         _, stored_metadata = load_artifacts()
-        metadata = public_model_metadata(stored_metadata)
+    except FileNotFoundError:
+        return {
+            "status": "ok",
+            "model_ready": False,
+            "service": {"version": SERVICE_VERSION, "git_sha": GIT_SHA},
+            "model": None,
+        }
     return {
         "status": "ok",
-        "model_ready": model_ready,
+        "model_ready": True,
         "service": {"version": SERVICE_VERSION, "git_sha": GIT_SHA},
-        "model": metadata,
+        "model": public_model_metadata(stored_metadata),
     }
 
 
