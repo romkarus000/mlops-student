@@ -22,7 +22,8 @@
 | DVC | описывает воспроизводимый pipeline data → train → monitor |
 | Docker Compose | запускает MLflow и API |
 | GitHub Actions (CI) | `ci.yml` — проверяет pipeline, тесты, мониторинг и Docker-сборку |
-| GitHub Actions (CD) | `cd.yml` — публикует образ в GHCR и деплоит на сервер по SSH |
+| GitHub Actions (CD) | `cd.yml` — публикует образ в GHCR, деплоит через Docker Compose и раскатывает `churn-api` в Kubernetes (k3s) |
+| Kubernetes (k3s) | `k8s/deployment.yaml`+`k8s/service.yaml` — 2 реплики `churn-api` за `Service`, самовосстановление и readiness-проверки |
 
 ## Контракт API
 
@@ -285,6 +286,47 @@ reviewers) и секреты `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` —
 они привязаны к конкретному репозиторию и не переносятся при форке. В форке
 без своих секретов job деплоя просто упадёт на шаге SSH, ничьи чужие сервера
 это не затрагивает.
+
+## Kubernetes deploy
+
+После шага Docker Compose тот же `deploy` job в `cd.yml` по SSH раскатывает
+`churn-api` в Kubernetes:
+
+1. если на `DEPLOY_HOST` ещё нет `kubectl`/`k3s` — устанавливает k3s
+   (однобинарный, однонодовый Kubernetes, официальный скрипт
+   `https://get.k3s.io`); повторный запуск безопасен и ничего не переустанавливает;
+2. создаёт/обновляет `Secret` `ghcr-pull` (`kubectl create secret
+   docker-registry`) из короткоживущего `GITHUB_TOKEN` текущего workflow run —
+   нужен, чтобы k3s мог тянуть приватный образ из GHCR;
+3. подставляет тег образа, Git SHA и `MLFLOW_TRACKING_URI` в
+   `k8s/deployment.yaml` и применяет `k8s/deployment.yaml` + `k8s/service.yaml`;
+4. ждёт `kubectl rollout status deployment/churn-api`;
+5. делает smoke-test `curl :30080/health` и `curl :30080/predict` прямо на
+   хосте (через `Service` типа `NodePort`).
+
+`Deployment` держит **2 реплики** `churn-api` с `readinessProbe`/`livenessProbe`
+на `/health` — если реплика падает, Kubernetes перезапускает её сам, а
+`Service` продолжает направлять трафик только на готовые Pod'ы. Проверить
+руками:
+
+```bash
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+kubectl get pods -l app=churn-api
+kubectl describe service churn-api
+kubectl delete pod -l app=churn-api --field-selector=status.phase=Running -o name | head -n1 | xargs kubectl delete
+kubectl get pods -l app=churn-api -w   # видно, как Deployment поднимает новый Pod
+```
+
+MLflow при этом продолжает жить в Docker Compose (`docker-compose.prod.yml`,
+порт 5000 на хосте) — в Kubernetes переехал только сам API-сервис, как и в
+вебинаре. Pod'ы обращаются к MLflow по IP хоста
+(`http://<DEPLOY_HOST>:5000`), а не по DNS-имени контейнера, потому что это
+однонодовый k3s без выделенной сети Docker Compose — такое ограничение
+типично для учебного/single-node стенда и не подойдёт для мульти-нодового
+прод-кластера без отдельного MLflow-сервиса внутри Kubernetes.
+
+CI на каждый pull request дополнительно валидирует манифесты без реального
+кластера: `kubectl apply --dry-run=client -f k8s/`.
 
 ## Метрики и ограничения
 
