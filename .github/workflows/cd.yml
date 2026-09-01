@@ -61,3 +61,42 @@ jobs:
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d
             docker image prune -f
+
+      - name: Deploy to Kubernetes
+        uses: appleboy/ssh-action@v1
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: GHCR_TOKEN
+          script: |
+            set -e
+            cd /opt/mlops-student
+
+            if ! command -v kubectl >/dev/null 2>&1; then
+              curl -sfL https://get.k3s.io | sh -
+            fi
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            KUBECTL="k3s kubectl"
+
+            $KUBECTL create secret docker-registry ghcr-pull \
+              --docker-server=ghcr.io \
+              --docker-username=${{ github.actor }} \
+              --docker-password="$GHCR_TOKEN" \
+              --dry-run=client -o yaml | $KUBECTL apply -f -
+
+            sed \
+              -e "s#IMAGE_PLACEHOLDER#ghcr.io/${{ github.repository }}:${{ needs.build-and-push.outputs.sha }}#" \
+              -e "s#GIT_SHA_PLACEHOLDER#${{ needs.build-and-push.outputs.sha }}#" \
+              -e "s#MLFLOW_TRACKING_URI_PLACEHOLDER#http://${{ secrets.DEPLOY_HOST }}:5000#" \
+              k8s/deployment.yaml | $KUBECTL apply -f -
+            $KUBECTL apply -f k8s/service.yaml
+
+            $KUBECTL rollout status deployment/churn-api --timeout=120s
+
+            curl -sf http://localhost:30080/health
+            curl -sf -X POST http://localhost:30080/predict \
+              -H "Content-Type: application/json" \
+              --data-binary @examples/predict_customer.json
