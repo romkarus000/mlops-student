@@ -1,0 +1,41 @@
+name: Promote model to production
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Train and promote on the deploy host
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/mlops-student
+
+            cat > /tmp/promote_production.py <<'PY'
+            import os
+            from mlflow import MlflowClient
+            from src.churn_ml.training import train
+
+            result = train()
+            version = result["registry_version"]
+
+            client = MlflowClient(tracking_uri=os.environ["MLFLOW_TRACKING_URI"])
+            client.set_registered_model_alias("hybrid-review-churn", "production", version)
+            print(f"hybrid-review-churn v{version} -> alias production")
+            PY
+
+            docker run --rm --network host \
+              -e MLFLOW_TRACKING_URI=http://127.0.0.1:5000 \
+              -v "$(pwd)":/repo \
+              -v /tmp/promote_production.py:/repo/promote_production.py:ro \
+              -w /repo \
+              python:3.11-slim bash -c "pip install --quiet -r requirements.txt && python scripts/generate_data.py && python promote_production.py"
+
+            rm -f /tmp/promote_production.py
