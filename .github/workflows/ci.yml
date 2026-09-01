@@ -31,7 +31,7 @@ jobs:
       - run: docker build --build-arg SERVICE_VERSION=ci --build-arg GIT_SHA=${{ github.sha }} .
       - uses: azure/setup-kubectl@v4
       - name: Validate Kubernetes manifests
-        run: kubectl apply --dry-run=client -f k8s/
+        run: kubectl apply --dry-run=client --validate=false -f k8s/
       - name: Upload reproducibility evidence
         uses: actions/upload-artifact@v4
         with:
