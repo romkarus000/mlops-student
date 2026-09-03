@@ -1,0 +1,34 @@
+name: Docker Compose status (read-only)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Inspect docker-compose.prod.yml on the deploy host
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/mlops-student
+
+            echo "### docker compose ps"
+            docker compose -f docker-compose.prod.yml ps -a
+
+            echo "### mlflow logs (tail)"
+            docker compose -f docker-compose.prod.yml logs --tail=150 mlflow
+
+            echo "### api logs (tail)"
+            docker compose -f docker-compose.prod.yml logs --tail=100 api
+
+            echo "### df -h"
+            df -h /
+
+            echo "### mlflow-data volume contents"
+            docker run --rm -v mlops-student_mlflow-data:/mlflow alpine sh -c "ls -la /mlflow && echo --- && du -sh /mlflow/* 2>/dev/null"
