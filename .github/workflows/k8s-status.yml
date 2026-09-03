@@ -1,0 +1,37 @@
+name: Kubernetes status (read-only)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Inspect churn-api on the deploy host
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            KUBECTL="k3s kubectl"
+
+            echo "### get pods"
+            $KUBECTL get pods -l app=churn-api -o wide
+
+            echo "### describe deployment"
+            $KUBECTL describe deployment churn-api
+
+            echo "### describe pods"
+            $KUBECTL describe pods -l app=churn-api
+
+            echo "### logs (current + previous container, all pods)"
+            for pod in $($KUBECTL get pods -l app=churn-api -o jsonpath='{.items[*].metadata.name}'); do
+              echo "--- logs: $pod ---"
+              $KUBECTL logs "$pod" --tail=100 || true
+              echo "--- previous logs: $pod ---"
+              $KUBECTL logs "$pod" --previous --tail=100 || true
+            done
