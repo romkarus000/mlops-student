@@ -159,7 +159,18 @@ def _load_from_registry():
             _model_cache["registry_version"],
             current_version,
         )
-        bundle, metadata = _download_registry_version(tracking_uri, current_version)
+        try:
+            bundle, metadata = _download_registry_version(tracking_uri, current_version)
+        except Exception as exc:  # artifact store unreachable or version not downloadable
+            LOGGER.warning(
+                "mlflow_registry_download_failed version=%s error=%s",
+                current_version,
+                exc,
+            )
+            if _model_cache["bundle"] is not None:
+                _model_cache["checked_at"] = now  # avoid hammering a broken version
+                return _model_cache["bundle"], _model_cache["metadata"]
+            return None
         _model_cache.update(
             bundle=bundle,
             metadata=metadata,
