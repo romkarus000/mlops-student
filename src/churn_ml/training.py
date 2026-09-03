@@ -8,6 +8,7 @@ import joblib
 import mlflow
 import pandas as pd
 import yaml
+from mlflow import MlflowClient
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -31,6 +32,7 @@ from .features import (
 
 ROOT = Path(__file__).resolve().parents[2]
 MODEL_NAME = "hybrid-review-churn"
+EXPERIMENT_NAME = "hybrid-review-churn"
 
 
 def load_params():
@@ -140,10 +142,19 @@ def train():
     metadata_path = models_dir / "model_metadata.json"
     report_path = reports_dir / "training_metrics.json"
 
-    mlflow.set_tracking_uri(
-        os.getenv("MLFLOW_TRACKING_URI", f"file://{ROOT / 'mlruns'}")
-    )
-    mlflow.set_experiment("hybrid-review-churn-demo")
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI", f"file://{ROOT / 'mlruns'}")
+    mlflow.set_tracking_uri(tracking_uri)
+    client = MlflowClient()
+    if client.get_experiment_by_name(EXPERIMENT_NAME) is None:
+        if tracking_uri.startswith("http"):
+            # explicit mlflow-artifacts: scheme so runs are downloadable by any
+            # client through the tracking server's artifact proxy
+            # (--serve-artifacts), not only by processes sharing the server's
+            # local filesystem/volume
+            client.create_experiment(EXPERIMENT_NAME, artifact_location="mlflow-artifacts:/")
+        else:
+            client.create_experiment(EXPERIMENT_NAME)
+    mlflow.set_experiment(EXPERIMENT_NAME)
     with mlflow.start_run(run_name="hybrid-sentiment-churn") as run:
         model_version = run.info.run_id
         bundle = {
