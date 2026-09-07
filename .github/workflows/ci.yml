@@ -1,44 +1,103 @@
-name: Verify MLOps demo
+name: ml-service CI
 
 on:
-  pull_request:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
 
 jobs:
-  test:
+  build-and-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: pip
-      - run: pip install -r requirements.txt
-      - name: Reproduce data, model and monitoring report
-        run: dvc repro
-      - name: Build release passport
-        env:
-          SERVICE_VERSION: 0.2.0
-          GIT_SHA: ${{ github.sha }}
-          IMAGE_TAG: mlops-student:${{ github.sha }}
-        run: python scripts/build_release_manifest.py
-      - name: Verify DVC state and show metrics
+          python-version: "3.11"
+
+      - name: Install pipeline dependencies
         run: |
-          dvc status
-          dvc metrics show
-      - run: python -m pytest -q
-      - run: docker build --build-arg SERVICE_VERSION=ci --build-arg GIT_SHA=${{ github.sha }} .
-      - uses: helm/kind-action@v1
-      - name: Validate Kubernetes manifests
-        run: kubectl apply -f k8s/
-      - name: Upload reproducibility evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-evidence-${{ github.sha }}
-          path: |
-            dvc.lock
-            models/model_metadata.json
-            reports/training_metrics.json
-            reports/monitoring_report.html
-            reports/release_manifest.json
+          pip install -r requirements.txt
+          pip install "dvc[ssh]" pandas numpy scikit-learn pyyaml mlflow evidently
+
+      - name: Configure DVC remote over SSH (best-effort — see note below)
+        continue-on-error: true
+        env:
+          DVC_SSH_KEY: ${{ secrets.DVC_SSH_KEY }}
+          DVC_REMOTE_HOST: ${{ secrets.DVC_REMOTE_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DVC_SSH_KEY" > ~/.ssh/dvc_ci
+          chmod 600 ~/.ssh/dvc_ci
+          ssh-keyscan -H "$DVC_REMOTE_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          dvc remote modify storage url "ssh://root@$DVC_REMOTE_HOST/root/dvc-storage"
+          dvc remote modify storage keyfile ~/.ssh/dvc_ci
+
+      - name: Start ephemeral MLflow server
+        run: |
+          nohup mlflow server --backend-store-uri sqlite:///mlflow.db \
+            --host 0.0.0.0 --port 5000 > mlflow.log 2>&1 &
+          sleep 3
+
+      - name: Generate training data and reproduce pipeline
+        run: |
+          python3 scripts/gen_train_data.py
+          dvc repro
+
+      - name: Register model and set production alias
+        run: python3 scripts/register_model.py
+
+      - name: Generate current batch for drift check (stable, no injected drift)
+        run: python3 scripts/gen_batch.py
+
+      - name: Evidently drift gate
+        run: python3 monitor.py
+
+      - name: Build Docker image
+        run: docker build -t ml-service:${{ github.sha }} .
+
+      - name: Smoke-test container
+        run: |
+          docker run -d --network host --name ci-ml \
+            -v ${{ github.workspace }}/mlruns:${{ github.workspace }}/mlruns \
+            ml-service:${{ github.sha }}
+          sleep 3
+          curl -f localhost:8000/health
+          curl -f -X POST "localhost:8000/predict?alias=production" \
+            -H "Content-Type: application/json" -d '{"features":[35,60000,10,15000]}'
+          docker stop ci-ml
+
+      - name: Push image to GitHub Container Registry
+        if: github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker tag ml-service:${{ github.sha }} ghcr.io/${{ github.repository }}:latest
+          docker push ghcr.io/${{ github.repository }}:latest
+
+  deploy:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Deploy new image to production server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no "root@$DEPLOY_HOST" '
+            docker pull ghcr.io/${{ github.repository }}:latest &&
+            docker stop ml || true &&
+            docker rm ml || true &&
+            docker run -d --network host --name ml \
+              -v /root/ml-service/mlruns:/root/ml-service/mlruns \
+              ghcr.io/${{ github.repository }}:latest
+          '

@@ -1,10 +1,7 @@
 .venv/
-__pycache__/
-*.py[cod]
 mlruns/
-models/*.joblib
-models/*.json
-reports/*.html
-reports/*.json
-data/raw/*.csv
-.dvc/cache/
+mlflow.db
+mlflow.log
+uvicorn.log
+drift_report.html
+data/production_batch.csv

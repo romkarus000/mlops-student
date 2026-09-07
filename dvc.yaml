@@ -1,31 +1,14 @@
 stages:
-  generate_data:
-    cmd: python scripts/generate_data.py
-    deps:
-      - scripts/generate_data.py
-      - params.yaml
-      - requirements.txt
-    outs:
-      - data/raw/churn_reference.csv
-      - data/raw/churn_current.csv
   train:
-    cmd: python -m src.churn_ml.training
+    cmd: python src/train.py
     deps:
-      - data/raw/churn_reference.csv
-      - src/churn_ml/training.py
-      - params.yaml
-      - requirements.txt
+      - data/train.csv
+      - src/train.py
+    params:
+      - train.n_estimators
+      - train.max_depth
     outs:
-      - models/hybrid_churn_bundle.joblib
-      - models/model_metadata.json
+      - models/model.pkl
     metrics:
-      - reports/training_metrics.json
-  monitor:
-    cmd: python -m src.churn_ml.monitoring
-    deps:
-      - data/raw/churn_reference.csv
-      - data/raw/churn_current.csv
-      - src/churn_ml/monitoring.py
-      - requirements.txt
-    outs:
-      - reports/monitoring_report.html
+      - metrics.json:
+          cache: false

@@ -1,82 +1,26 @@
 schema: '2.0'
 stages:
-  generate_data:
-    cmd: python scripts/generate_data.py
-    deps:
-    - path: params.yaml
-      hash: md5
-      md5: d89c93cdece2a5e411318833fa03b06e
-      size: 161
-    - path: requirements.txt
-      hash: md5
-      md5: 251f53f9ee16922f4d716cc5bcd31594
-      size: 218
-    - path: scripts/generate_data.py
-      hash: md5
-      md5: 59440bbf989f37c3e9126722e3d20e60
-      size: 3717
-    outs:
-    - path: data/raw/churn_current.csv
-      hash: md5
-      md5: 2ed6d95791ec47702b95fd2dee6da479
-      size: 167840
-    - path: data/raw/churn_reference.csv
-      hash: md5
-      md5: 1f67f301d6f48f88a71eb49878069539
-      size: 546631
   train:
-    cmd: python -m src.churn_ml.training
+    cmd: python src/train.py
     deps:
-    - path: data/raw/churn_reference.csv
+    - path: data/train.csv
       hash: md5
-      md5: 1f67f301d6f48f88a71eb49878069539
-      size: 546631
-    - path: params.yaml
+      md5: e0bae983c541b7e39dd7d3988a5c314c
+      size: 16024
+    - path: src/train.py
       hash: md5
-      md5: d89c93cdece2a5e411318833fa03b06e
-      size: 161
-    - path: requirements.txt
-      hash: md5
-      md5: 251f53f9ee16922f4d716cc5bcd31594
-      size: 218
-    - path: src/churn_ml/training.py
-      hash: md5
-      md5: e3f4df2a98d6a9f5baeb4e32f307faa9
-      size: 6060
+      md5: 37a98494dfdda59be6904b54abbedb17
+      size: 848
+    params:
+      params.yaml:
+        train.max_depth: 5
+        train.n_estimators: 300
     outs:
-    - path: models/hybrid_churn_bundle.joblib
+    - path: metrics.json
       hash: md5
-      md5: 4892bf9b923a3746603fb363d42599cb
-      size: 10373
-    - path: models/model_metadata.json
+      md5: 20560efff3e462be05fa7e6164da7c29
+      size: 35
+    - path: models/model.pkl
       hash: md5
-      md5: 8cb75a98d8ba3c2596d30e70aa240ce1
-      size: 468
-    - path: reports/training_metrics.json
-      hash: md5
-      md5: 203f60068792d57d485face8270165ab
-      size: 148
-  monitor:
-    cmd: python -m src.churn_ml.monitoring
-    deps:
-    - path: data/raw/churn_current.csv
-      hash: md5
-      md5: 2ed6d95791ec47702b95fd2dee6da479
-      size: 167840
-    - path: data/raw/churn_reference.csv
-      hash: md5
-      md5: 1f67f301d6f48f88a71eb49878069539
-      size: 546631
-    - path: requirements.txt
-      hash: md5
-      md5: 251f53f9ee16922f4d716cc5bcd31594
-      size: 218
-    - path: src/churn_ml/monitoring.py
-      hash: md5
-      md5: bbd34873e3def2e823e82fd7c0b21f0f
-      size: 1533
-    outs:
-    - path: reports/monitoring_report.html
-      hash: md5
-      md5: c4fdbcbe0e7e2495377472b23bf1af96
-      size: 3159407
+      md5: 7473b190db834fb00faf60c16e4f9658
+      size: 1268758
