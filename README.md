@@ -1,356 +1,252 @@
-# Учебный MLOps-проект: гибридный прогноз оттока
+# ml-service
 
-Проект показывает полный MLOps-цикл на задаче прогноза оттока клиентов. API
-анализирует текст отзыва, объединяет вероятность негативной тональности с
-поведенческими признаками клиента и возвращает риск оттока.
+Учебный MLOps-стенд: сервис кредитного скоринга, собранный вручную инструмент за
+инструментом — от контейнера до CI/CD с деплоем. Использовался как рабочий проект
+для вебинара по MLOps; этот README — методичка, свёрнутая до состояния документации
+репозитория: что тут есть, как это поднять с нуля и на какие грабли реально
+наступали при сборке.
 
-Негативный отзыв повышает риск, но не определяет его автоматически: churn-модель
-также учитывает активность, срок жизни клиента, тариф, обращения в поддержку,
-задержки оплаты и NPS.
+```
+Docker → FastAPI → DVC → MLflow → Evidently → GitHub Actions (CI/CD)
+```
+
+Ключевая идея всего стенда: это не пять изолированных демо-стендов, а один
+наращиваемый сервис. Контейнер, поднятый в разделе Docker, остаётся жить до конца —
+FastAPI, DVC, MLflow и Evidently достраиваются вокруг него, а не поднимают
+параллельные копии.
+
+## Содержание
+
+- [Архитектура](#архитектура)
+- [Быстрый старт с нуля](#быстрый-старт-с-нуля)
+- [Docker](#docker)
+- [FastAPI-сервис](#fastapi-сервис)
+- [DVC — данные и пайплайн обучения](#dvc--данные-и-пайплайн-обучения)
+- [MLflow — трекинг и реестр моделей](#mlflow--трекинг-и-реестр-моделей)
+- [Evidently — мониторинг дрифта](#evidently--мониторинг-дрифта)
+- [CI/CD — GitHub Actions](#cicd--github-actions)
+- [Kubernetes (опционально)](#kubernetes-опционально)
+- [Известные ограничения и нюансы](#известные-ограничения-и-нюансы)
 
 ## Архитектура
 
-| Компонент | Роль |
+| Файл/директория | Роль |
 |---|---|
-| `scripts/generate_data.py` | создаёт синтетические reference/current данные, отзывы и метки тональности |
-| TF-IDF + Logistic Regression | определяет positive/negative sentiment отзыва |
-| Churn Logistic Regression | использует клиентские признаки и negative sentiment probability |
-| MLflow | хранит параметры, метрики, bundle модели и неизменяемый run ID |
-| MLflow Model Registry | версионирует модель (`v1`, `v2`, ...) и хранит alias `production` |
-| FastAPI | предоставляет `/health`, `/predict`, `/admin/reload-model` с трассировкой запросов |
-| Evidently | формирует отчёт о data drift |
-| DVC | описывает воспроизводимый pipeline data → train → monitor |
-| Docker Compose | запускает MLflow и API |
-| GitHub Actions (CI) | `ci.yml` — проверяет pipeline, тесты, мониторинг и Docker-сборку |
-| GitHub Actions (CD) | `cd.yml` — публикует образ в GHCR, деплоит через Docker Compose и раскатывает `churn-api` в Kubernetes (k3s) |
-| Kubernetes (k3s) | `k8s/deployment.yaml`+`k8s/service.yaml` — 2 реплики `churn-api` за `Service`, самовосстановление и readiness-проверки |
+| `Dockerfile`, `app/main.py` | FastAPI-сервис — точка входа для модели |
+| `requirements.txt` | Зависимости **сервиса** (то, что едет в образ) |
+| `data/train.csv` | Обучающий датасет, версионируется через DVC |
+| `dvc.yaml`, `params.yaml`, `dvc.lock` | Пайплайн обучения: структура, гиперпараметры, зафиксированные хеши прогона |
+| `src/train.py` | Код обучения модели + логирование в MLflow |
+| `monitor.py` | Evidently-отчёт и CI-гейт по дрифту данных |
+| `scripts/gen_train_data.py` | Детерминированный генератор `data/train.csv` — используется в CI вместо сетевого `dvc pull` |
+| `scripts/gen_batch.py` | Детерминированный генератор "продового" батча для дрифт-гейта в CI |
+| `scripts/register_model.py` | Регистрация обученной модели в MLflow Model Registry + алиас `production` |
+| `.github/workflows/ci.yml` | CI (сборка, тесты, дрифт-гейт) + CD (деплой на прод-сервер) |
 
-## Контракт API
+## Быстрый старт с нуля
 
-Swagger UI после запуска доступен на `http://localhost:8000/docs`.
-
-Пример запроса:
-
-```json
-{
-  "customer_id": "C-HIGH-RISK",
-  "review_text": "Разочарован качеством, хочу отменить подписку",
-  "customer": {
-    "tenure_months": 2,
-    "monthly_fee": 1990,
-    "days_active_last_30": 2,
-    "support_tickets_last_30": 6,
-    "payment_delay_days": 8,
-    "nps_score": 1,
-    "plan": "premium"
-  }
-}
-```
+Стенд рассчитан на чистую VM с Ubuntu 24.04. Все команды — от `root`.
 
 ```bash
-curl -X POST http://localhost:8000/predict \
+git clone <URL-этого-репозитория> ml-service
+cd ml-service
+```
+
+Дальше по порядку — разделы ниже; каждый содержит установку, настройку и способ
+проверить, что шаг реально сработал.
+
+## Docker
+
+**Установка Docker Engine** (официальный репозиторий, не `snap` и не пакет дистрибутива):
+
+```bash
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+  apt-get remove -y $pkg
+done
+
+apt-get -o DPkg::Lock::Timeout=300 update
+apt-get -o DPkg::Lock::Timeout=300 install -y ca-certificates curl
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+apt-get -o DPkg::Lock::Timeout=300 update
+apt-get -o DPkg::Lock::Timeout=300 install -y \
+  docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+docker run --rm hello-world
+```
+
+> **Нюанс.** На свежих облачных образах в первые минуты после старта работает
+> `unattended-upgrades` и держит `dpkg`-лок — без флага `-o DPkg::Lock::Timeout=300`
+> `apt-get install` сразу падает с `Could not get lock`. Если после установки
+> `systemctl status docker` показывает `failed (service-start-limit-hit)` —
+> `systemctl reset-failed docker.socket docker.service && systemctl restart docker`.
+
+**Сборка и запуск:**
+
+```bash
+docker pull python:3.11-slim   # если 429 Too Many Requests — см. раздел "Известные ограничения"
+docker build -t ml-service:0.1 .
+docker run -d -p 8000:8000 --name ml ml-service:0.1
+
+curl localhost:8000/health
+```
+
+## FastAPI-сервис
+
+Два эндпоинта:
+
+- `GET /health` — проверка живости, её же читает readiness-проба Kubernetes.
+- `POST /predict?alias=production` — предсказание модели. Параметр `alias`
+  (`production` по умолчанию, либо `staging`) определяет, какую версию модели из
+  MLflow Model Registry загружать — переключение версий без пересборки образа.
+
+```bash
+curl -X POST "localhost:8000/predict?alias=production" \
   -H "Content-Type: application/json" \
-  -H "X-Request-ID: demo-request-001" \
-  --data-binary @examples/predict_customer.json
+  -d '{"features":[35, 60000, 10, 15000]}'
+# {"prediction": 0.0, "model_alias": "production"}
 ```
 
-Пример ответа:
+Признаки на входе, в порядке: `age`, `income`, `credit_history_years`, `loan_amount`.
 
-```json
-{
-  "request_id": "demo-request-001",
-  "customer_id": "C-HIGH-RISK",
-  "service": {
-    "version": "0.2.0",
-    "git_sha": "abc1234"
-  },
-  "model": {
-    "name": "hybrid-review-churn",
-    "version": "mlflow-run-id",
-    "mlflow_run_id": "mlflow-run-id",
-    "sha256": "model-digest",
-    "trained_at": "2026-08-24T12:00:00+00:00"
-  },
-  "review_analysis": {
-    "sentiment": "negative",
-    "negative_probability": 0.97
-  },
-  "churn_prediction": {
-    "probability": 0.63,
-    "risk": "high",
-    "threshold": 0.5
-  }
-}
-```
+Автосгенерированная документация — `/docs` (Swagger UI), строится из Pydantic-схемы
+`PredictRequest` без единой дополнительной строки кода.
 
-Если `X-Request-ID` не передан, API создаёт UUID. Идентификатор возвращается
-одновременно в JSON и HTTP-заголовке. Версия модели — MLflow run ID, SHA256
-позволяет проверить целостность конкретного bundle.
+Модель кэшируется в памяти процесса на алиас — при первом запросе с новым алиасом
+она грузится из MLflow, дальше переиспользуется. Если алиас в Registry подвинули на
+другую версию — уже запущенный сервис продолжит отдавать старую до перезапуска
+контейнера (см. «Известные ограничения»).
 
-## Локальный запуск
-
-Нужен Python 3.11+.
+## DVC — данные и пайплайн обучения
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-dvc repro
-python scripts/build_release_manifest.py
-make verify
-uvicorn src.churn_ml.api:app --reload --port 8000
+apt-get -o DPkg::Lock::Timeout=300 install -y python3-venv
+python3 -m venv .venv && source .venv/bin/activate
+pip install dvc pandas numpy scikit-learn pyyaml
+
+mkdir -p ~/dvc-storage   # локальный remote для учебного стенда
+dvc pull   # или python3 scripts/gen_train_data.py, если remote недоступен
+dvc repro  # обучает модель по params.yaml, пишет models/model.pkl и metrics.json
 ```
 
-Артефакты:
+`params.yaml` — гиперпараметры (`n_estimators`, `max_depth`), отдельно от кода
+`src/train.py`: DVC отслеживает изменения этого файла как зависимость стадии
+`train` и пересчитывает пайплайн только когда параметры реально изменились.
+`dvc.lock` фиксирует, какие именно хеши данных/кода/параметров дали текущий
+результат — это и есть журнал экспериментов на уровне файлов
+(`dvc metrics diff` сравнивает прогоны).
 
-- `data/raw/churn_reference.csv` и `churn_current.csv`;
-- `models/hybrid_churn_bundle.joblib`;
-- `models/model_metadata.json`;
-- `reports/training_metrics.json`;
-- `reports/monitoring_report.html`;
-- `reports/release_manifest.json` — паспорт конкретной поставки.
-
-Без переменной `MLFLOW_TRACKING_URI` обучение использует локальный каталог
-`mlruns`. При запуске через Compose run записывается в MLflow-сервис.
-
-## Docker Compose
+## MLflow — трекинг и реестр моделей
 
 ```bash
-docker compose up -d --build
-docker compose ps
-docker compose logs -f api
+nohup mlflow server \
+  --backend-store-uri sqlite:///mlflow.db \
+  --default-artifact-root ./mlruns \
+  --host 0.0.0.0 --port 5000 > mlflow.log 2>&1 &
+
+python3 src/train.py     # логирует run в эксперимент "credit-scoring"
+python3 scripts/register_model.py   # регистрирует модель, ставит алиас production
 ```
 
-Сервисы:
-
-- API: `http://localhost:8000`;
-- Swagger: `http://localhost:8000/docs`;
-- MLflow: `http://localhost:5000`.
-
-Для корректных версий образ можно собрать так:
+UI — `http://localhost:5000`. Начиная с MLflow 3.x сервер защищён от DNS rebinding
+и принимает только `Host: localhost`/`127.0.0.1` — открыть его по внешнему IP
+напрямую не выйдет (`403`); для доступа снаружи используйте SSH-туннель:
 
 ```bash
-SERVICE_VERSION=0.2.0 GIT_SHA=abc1234 docker compose build api
+ssh -L 5000:localhost:5000 root@<ip-сервера>
+# и открывайте http://localhost:5000 у себя
 ```
 
-## DVC pipeline
+Версии модели адресуются через алиасы, а не через "stage" (устаревший API):
 
-Репозиторий уже инициализирован для DVC. Первый запуск строит все артефакты и
-создаёт локальный cache, повторный — пропускает неизменившиеся этапы:
+```python
+from mlflow.tracking import MlflowClient
+client = MlflowClient()
+client.set_registered_model_alias("credit-model", "production", 2)  # перевод прода на версию 2
+client.set_registered_model_alias("credit-model", "staging", 1)     # откат/кандидат
+```
+
+## Evidently — мониторинг дрифта
 
 ```bash
-dvc repro
-dvc dag
-dvc status
-dvc metrics show
+python3 scripts/gen_batch.py   # "продовый" батч (в CI — без искусственного сдвига)
+python3 monitor.py             # отчёт + гейт с кодом возврата для CI
 ```
 
-Этапы в `dvc.yaml`:
+`monitor.py` строит `DataDriftPreset` (K-S тест по числовым признакам), сохраняет
+`drift_report.html` и завершается с ненулевым кодом, если доля задрифтивших колонок
+превышает порог — именно этот код возврата CI использует, чтобы блокировать деплой
+до, а не после того, как дрифт попал в прод.
 
-1. `generate_data`;
-2. `train`;
-3. `monitor`.
+## CI/CD — GitHub Actions
 
-Изменение кода, `params.yaml` или исходных данных перезапускает только
-зависимые этапы. `dvc.lock` фиксирует точные хеши зависимостей и результатов;
-его нужно коммитить вместе с изменением pipeline. `requirements.txt` также
-является зависимостью этапов, поэтому смена ML-окружения не останется незаметной.
+`.github/workflows/ci.yml`, две джобы:
 
-В проекте данные синтетические, поэтому для занятия достаточно локального DVC
-cache. Для общей команды подключается remote, например S3:
+**`build-and-test`** (push/PR в `main`): устанавливает зависимости → обучает модель
+на детерминированных данных (`scripts/gen_train_data.py`, без сетевого `dvc pull` —
+см. нюансы) → регистрирует её в MLflow с алиасом `production` → прогоняет
+Evidently-гейт → собирает Docker-образ → smoke-тестит контейнер настоящим вызовом
+`/predict?alias=production` → пушит образ в GHCR (`ghcr.io/<repo>:latest`, только на
+`main`).
+
+**`deploy`** (`needs: build-and-test`, только `main`): по SSH разворачивает свежий
+образ из GHCR на целевом сервере. Требует секреты `DEPLOY_HOST` и `DEPLOY_SSH_KEY` —
+без них джоба **ожидаемо падает** на шаге подключения (`Could not resolve
+hostname`). Сама процедура уже написана и корректна:
 
 ```bash
-dvc remote add -d storage s3://your-bucket/mlops-student
-dvc push
+gh secret set DEPLOY_HOST -b"<ip-прод-сервера>"
+gh secret set DEPLOY_SSH_KEY < ~/.ssh/deploy_key
 ```
 
-Адрес и учётные данные реального хранилища не коммитятся в учебный репозиторий.
+после чего джоба сама подключится, остановит старый контейнер и поднимет новый.
 
-## MLflow и версия модели
+## Kubernetes (опционально)
 
-Каждое обучение создаёт MLflow run и сохраняет его неизменяемый ID в
-`models/model_metadata.json`. Тот же ID возвращают `/health` и `/predict`.
-Вместе с ним сохраняются параметры, метрики и SHA256 model bundle. Так можно
-ответить не только «какой код был в Git», но и «какой именно запуск создал
-модель, обслужившую запрос».
-
-Порог классификации берётся из `params.yaml`, попадает в model bundle и
-используется API. Поэтому изменение порога тоже проходит через DVC и не
-расходится между обучением и инференсом.
-
-## Model Registry: продвижение и откат
-
-Каждое обучение не только логирует run, но и регистрирует новую версию модели
-в MLflow Model Registry (`hybrid-review-churn`, `v1`, `v2`, ...). Новая версия
-сама по себе ничего не меняет в проде — она просто становится доступной для
-сравнения и явного продвижения.
-
-Продвинуть версию в production (или откатиться на более раннюю) — один шаг,
-без пересборки образа:
+Локальный кластер через `minikube` (учебный, не production):
 
 ```bash
-python scripts/promote_model.py --version 3      # продвинуть v3
-python scripts/promote_model.py --version 2      # откатиться на v2
+minikube start --driver=docker --force
+minikube image load ml-service:0.1   # свой Docker-демон у minikube — образ нужно занести явно
+kubectl apply -f deployment.yaml     # Deployment (2 реплики, readinessProbe на /health) + Service
 ```
 
-Скрипт просто переставляет alias `production` на нужную версию в MLflow — то
-же самое можно сделать без кода, в MLflow UI (`Models → hybrid-review-churn →
-Add Alias`).
+## Известные ограничения и нюансы
 
-API резолвит модель для инференса не по локальному файлу, а по alias'у
-`production` через MLflow Model Registry, и **сам обнаруживает смену версии**:
-при каждом запросе (не чаще, чем раз в `MLFLOW_MODEL_REFRESH_SECONDS`, по
-умолчанию 30 секунд) сервис лёгким запросом сверяет, на какую версию сейчас
-указывает alias, и только если она отличается от закэшированной в памяти —
-скачивает новый bundle и подменяет модель. Ручной рестарт или редеплой
-сервиса не нужен. Если нужно применить продвижение немедленно, не дожидаясь
-истечения интервала:
+- **`docker pull python:3.11-slim` → `429 Too Many Requests`.** Лимит анонимных
+  pull'ов Docker Hub. Обход: `docker pull mirror.gcr.io/library/python:3.11-slim &&
+  docker tag mirror.gcr.io/library/python:3.11-slim python:3.11-slim`.
+- **MLflow-контейнер и модель по алиасу: `--network host`, а не проброс портов.**
+  MLflow 3.x проверяет заголовок `Host` у входящих запросов и пропускает только
+  `localhost`; `host.docker.internal` эту проверку не проходит. Контейнер сервиса
+  нужно поднимать с `--network host`.
+- **`No such artifact: ''` при загрузке модели.** MLflow с локальным (файловым)
+  artifact store хранит путь к артефактам как путь на диске — клиенту нужен
+  реальный доступ к этой файловой системе, не только к API сервера. Решение —
+  монтировать `mlruns` в контейнер по тому же абсолютному пути:
+  `-v /root/ml-service/mlruns:/root/ml-service/mlruns`. С реальным облачным remote
+  (S3/GCS) этой проблемы нет.
+- **DVC-remote по SSH между разными облаками — ненадёжен.** Между GitHub Actions
+  (Azure) и одиночной VM ловили то таймауты, то обрыв соединения после успешного
+  логина (похоже на MTU на стыке облаков). В CI это обойдено генерацией данных на
+  месте (`scripts/gen_train_data.py`); шаг с SSH-remote оставлен в workflow как
+  рабочая демонстрация механики, помечен `continue-on-error: true`.
+- **`git init` без `-b main` создаёт `master`.** CI и `gh pr create` в этом
+  репозитории написаны под ветку `main`.
+- **GHCR-пуш: `denied: installation not allowed to Create organization package`.**
+  Нужен явный `permissions: packages: write` у джобы в workflow — без него
+  автоматический `GITHUB_TOKEN` может не иметь права записи в GitHub Packages.
 
-```bash
-curl -X POST http://localhost:8000/admin/reload-model
-```
+---
 
-Если `MLFLOW_TRACKING_URI` не задан (например, локальный запуск без Compose),
-API прозрачно откатывается на старое поведение — читает
-`models/hybrid_churn_bundle.joblib` напрямую с диска. Так же он откатывается
-(и логирует предупреждение, а не падает), если alias резолвится, но сам
-bundle скачать не удалось — например, из клиента, у которого нет прямого
-доступа к файловой системе MLflow-сервера.
-
-MLflow-сервер в обоих Compose-файлах запускается с `--serve-artifacts`:
-без этого флага клиент, скачивающий модель по alias (включая API-под в
-Kubernetes — у него нет общего volume с `mlflow`), пытался бы читать
-артефакт по локальному пути внутри контейнера `mlflow` и получал `No such
-file or directory`. С `--serve-artifacts` скачивание идёт через HTTP
-(тот же `MLFLOW_TRACKING_URI`), поэтому работает из любого клиента, а не
-только из контейнера, примонтировавшего тот же volume.
-
-## Сравнение версии-кандидата с production
-
-Перед тем как продвигать новую версию, её можно оценить на тех же «текущих»
-(смещённых) данных, что использует мониторинг дрейфа:
-
-```bash
-python scripts/compare_versions.py --candidate 3
-# baseline по умолчанию — текущая версия за alias production
-python scripts/compare_versions.py --candidate 3 --baseline 2
-```
-
-Скрипт скачивает обе версии из Registry по номеру, прогоняет их на
-`data/raw/churn_current.csv` и печатает те же метрики (`roc_auc`,
-`average_precision`, `sentiment_accuracy`, `sentiment_f1`) бок о бок с
-разницей. Так как `churn_current.csv` — синтетические данные с намеренным
-сдвигом распределения, сравнение отвечает не просто «какая модель лучше
-вообще», а «какая версия увереннее держит удар на данных, непохожих на
-обучающие». Это ручной, «по требованию» шаг — естественная точка перед
-`promote_model.py`, а не часть автоматического CI.
-
-## Паспорт релиза
-
-После `dvc repro` выполните:
-
-```bash
-SERVICE_VERSION=0.2.0 \
-GIT_SHA=$(git rev-parse HEAD) \
-IMAGE_TAG=mlops-student:0.2.0 \
-python scripts/build_release_manifest.py
-```
-
-`reports/release_manifest.json` связывает в одной записи:
-
-- версию сервиса и Git SHA;
-- SHA256 `dvc.lock`, `params.yaml`, полного и runtime-набора зависимостей;
-- SHA256 reference/current данных;
-- MLflow run ID, SHA256 модели и рабочий threshold;
-- метрики и тег Docker-образа.
-
-Скрипт завершится ошибкой, если bundle модели не совпадает с digest в
-метаданных. Это простая, но реальная проверка целостности поставки.
-
-`requirements.txt` описывает среду обучения и CI, а компактный
-`requirements-runtime.txt` — только зависимости API. Поэтому Docker-образ не
-содержит DVC, pytest, Evidently и другие инструменты, не нужные при инференсе.
-
-## CI и CD
-
-Workflow `.github/workflows/ci.yml` на каждом pull request и push в `main`:
-
-1. устанавливает зафиксированные зависимости;
-2. выполняет `dvc repro`;
-3. формирует паспорт релиза;
-4. показывает DVC status и метрики;
-5. запускает тесты и собирает Docker-образ;
-6. прикладывает `dvc.lock`, метрики, metadata, monitoring report и release
-   manifest как evidence к запуску GitHub Actions.
-
-Workflow `.github/workflows/cd.yml` запускается автоматически после
-**успешного** завершения CI именно на ветке `main` (событие `workflow_run`) —
-то есть после мержа, а не на каждый pull request. Он:
-
-1. собирает Docker-образ и публикует его в GHCR
-   (`ghcr.io/<repo>:<sha>` и `:latest`);
-2. деплоит на сервер по SSH: заходит в `/opt/mlops-student`, обновляет код,
-   перезапускает `docker-compose.prod.yml`.
-
-Деплой использует GitHub Environment `production` (можно включить required
-reviewers) и секреты `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_KEY` —
-они привязаны к конкретному репозиторию и не переносятся при форке. В форке
-без своих секретов job деплоя просто упадёт на шаге SSH, ничьи чужие сервера
-это не затрагивает.
-
-## Kubernetes deploy
-
-После шага Docker Compose тот же `deploy` job в `cd.yml` по SSH раскатывает
-`churn-api` в Kubernetes:
-
-1. если на `DEPLOY_HOST` ещё нет `kubectl`/`k3s` — устанавливает k3s
-   (однобинарный, однонодовый Kubernetes, официальный скрипт
-   `https://get.k3s.io`); повторный запуск безопасен и ничего не переустанавливает;
-2. создаёт/обновляет `Secret` `ghcr-pull` (`kubectl create secret
-   docker-registry`) из короткоживущего `GITHUB_TOKEN` текущего workflow run —
-   нужен, чтобы k3s мог тянуть приватный образ из GHCR;
-3. подставляет тег образа, Git SHA и `MLFLOW_TRACKING_URI` в
-   `k8s/deployment.yaml` и применяет `k8s/deployment.yaml` + `k8s/service.yaml`;
-4. ждёт `kubectl rollout status deployment/churn-api`;
-5. делает smoke-test `curl :30080/health` и `curl :30080/predict` прямо на
-   хосте (через `Service` типа `NodePort`).
-
-`Deployment` держит **2 реплики** `churn-api` с `readinessProbe`/`livenessProbe`
-на `/health` — если реплика падает, Kubernetes перезапускает её сам, а
-`Service` продолжает направлять трафик только на готовые Pod'ы. Проверить
-руками:
-
-```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-kubectl get pods -l app=churn-api
-kubectl describe service churn-api
-kubectl delete pod -l app=churn-api --field-selector=status.phase=Running -o name | head -n1 | xargs kubectl delete
-kubectl get pods -l app=churn-api -w   # видно, как Deployment поднимает новый Pod
-```
-
-MLflow при этом продолжает жить в Docker Compose (`docker-compose.prod.yml`,
-порт 5000 на хосте) — в Kubernetes переехал только сам API-сервис, как и в
-вебинаре. Pod'ы обращаются к MLflow по IP хоста
-(`http://<DEPLOY_HOST>:5000`), а не по DNS-имени контейнера, потому что это
-однонодовый k3s без выделенной сети Docker Compose — такое ограничение
-типично для учебного/single-node стенда и не подойдёт для мульти-нодового
-прод-кластера без отдельного MLflow-сервиса внутри Kubernetes.
-
-CI на каждый pull request дополнительно валидирует манифесты: поднимает
-одноразовый `kind`-кластер и делает `kubectl apply -f k8s/` в нём — `kubectl
-apply` не поддерживает офлайн-валидацию без обращения к API-серверу, поэтому
-проще и надёжнее проверить на настоящем (пусть и эфемерном) кластере, чем
-имитировать это статическим анализом.
-
-## Метрики и ограничения
-
-Обучение сохраняет:
-
-- ROC AUC и Average Precision для churn;
-- Accuracy и F1 для sentiment;
-- размеры train/test выборок.
-
-Данные и отзывы синтетические. Метрики показывают воспроизводимость технического
-pipeline, а не готовность модели к реальному бизнес-применению. Для production
-понадобятся реальные отзывы, связь с последующим фактом оттока, контроль
-дисбаланса, защищённый ingress, аутентификация и постоянное хранилище мониторинга.
+Проект собирался как учебный материал; часть решений (локальный DVC-remote,
+одиночная VM вместо managed-инфраструктуры) — упрощения ради самодостаточности
+демонстрации, а не production-практика.
