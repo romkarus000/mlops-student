@@ -93,11 +93,14 @@ jobs:
   deploy:
     needs: build-and-test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # Деплой включается явно: gh variable set DEPLOY_ENABLED -b true
+    # (плюс секреты DEPLOY_HOST / DEPLOY_SSH_KEY, опционально DEPLOY_USER).
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     steps:
       - name: Deploy new image to production server
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER || 'root' }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           mkdir -p ~/.ssh
@@ -105,7 +108,7 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no "root@$DEPLOY_HOST" '
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no "$DEPLOY_USER@$DEPLOY_HOST" '
             docker pull ghcr.io/${{ github.repository }}:latest &&
             docker stop ml || true &&
             docker rm ml || true &&
