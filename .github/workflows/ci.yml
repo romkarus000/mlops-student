@@ -71,6 +71,18 @@ jobs:
             -H "Content-Type: application/json" -d '{"features":[35,60000,10,15000]}'
           docker stop ci-ml
 
+      - name: Build release passport
+        env:
+          SERVICE_VERSION: "0.1.0"
+          IMAGE_TAG: ghcr.io/${{ github.repository }}:${{ github.sha }}
+        run: python3 scripts/build_release_manifest.py
+
+      - name: Upload release passport
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: reports/release_manifest.json
+
       - name: Push image to GitHub Container Registry
         if: github.ref == 'refs/heads/main'
         run: |

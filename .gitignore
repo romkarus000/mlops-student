@@ -5,3 +5,4 @@ mlflow.log
 uvicorn.log
 drift_report.html
 data/production_batch.csv
+reports/
