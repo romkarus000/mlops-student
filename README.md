@@ -25,6 +25,7 @@ FastAPI, DVC, MLflow и Evidently достраиваются вокруг нег
 - [MLflow — трекинг и реестр моделей](#mlflow--трекинг-и-реестр-моделей)
 - [Evidently — мониторинг дрифта](#evidently--мониторинг-дрифта)
 - [CI/CD — GitHub Actions](#cicd--github-actions)
+- [Паспорт релиза](#паспорт-релиза)
 - [Kubernetes (опционально)](#kubernetes-опционально)
 - [Известные ограничения и нюансы](#известные-ограничения-и-нюансы)
 
@@ -40,6 +41,7 @@ FastAPI, DVC, MLflow и Evidently достраиваются вокруг нег
 | `monitor.py` | Evidently-отчёт и CI-гейт по дрифту данных |
 | `scripts/gen_train_data.py` | Детерминированный генератор `data/train.csv` — используется в CI вместо сетевого `dvc pull` |
 | `scripts/gen_batch.py` | Детерминированный генератор "продового" батча для дрифт-гейта в CI |
+| `scripts/build_release_manifest.py` | Паспорт релиза: коммит, DVC-состояние, модель из Registry, метрики, образ |
 | `scripts/register_model.py` | Регистрация обученной модели в MLflow Model Registry + алиас `production` |
 | `.github/workflows/ci.yml` | CI (сборка, тесты, дрифт-гейт) + CD (деплой на прод-сервер) |
 
@@ -208,6 +210,27 @@ gh secret set DEPLOY_SSH_KEY < ~/.ssh/deploy_key
 ```
 
 после чего джоба сама подключится, остановит старый контейнер и поднимет новый.
+
+## Паспорт релиза
+
+Один JSON-файл, который связывает коммит, состояние DVC-пайплайна, обученную
+модель, метрики и тег образа — чтобы про любую поставку можно было доказать, из чего
+она собрана.
+
+```bash
+python scripts/build_release_manifest.py                 # -> reports/release_manifest.json
+python scripts/build_release_manifest.py --skip-registry # без запроса к MLflow Registry
+```
+
+Перед запуском должен быть выполнен `dvc repro` (нужны `models/model.pkl`,
+`metrics.json`, `data/train.csv`). В паспорт попадают: SHA коммита и версия сервиса
+(`SERVICE_VERSION`, по умолчанию `0.1.0`); SHA256 `dvc.lock`, `params.yaml`,
+`requirements.txt`; SHA256 `data/train.csv`; SHA256 `models/model.pkl` и версия/`run_id`
+модели `credit-model@production` из MLflow Registry; метрики из `metrics.json`; тег
+образа (`IMAGE_TAG`). Недостающий входной файл — ошибка с подсказкой, а не пустое поле.
+
+В CI паспорт строится после smoke-теста и прикладывается к запуску артефактом
+`release-manifest`.
 
 ## Kubernetes (опционально)
 

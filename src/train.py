@@ -36,7 +36,11 @@ with mlflow.start_run():
     mlflow.log_param("n_estimators", params["n_estimators"])
     mlflow.log_param("max_depth", params["max_depth"])
     mlflow.log_metric("roc_auc", auc)
-    mlflow.sklearn.log_model(model, name="model")
+    mlflow.sklearn.log_model(
+        model,
+        name="model",
+        skops_trusted_types=["sklearn.tree._tree.Tree"],
+    )
 
 with open("models/model.pkl", "wb") as f:
     pickle.dump(model, f)
